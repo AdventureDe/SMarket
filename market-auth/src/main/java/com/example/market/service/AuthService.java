@@ -18,4 +18,10 @@ public interface AuthService {
      * @return 登录成功后的用户信息
      */
     LoginResponseDTO loginUser(UserLoginDTO request);
+
+    /**
+     * 用户登出
+     * 通常登出只需要知道成功没，不需要返回复杂对象，void 即可
+     */
+    void LogoutUser(String token);
 }

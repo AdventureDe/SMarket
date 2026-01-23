@@ -16,7 +16,11 @@ public class User {
     private String password;
     private String email;
     private String phone;
-    private Integer role;
+    private String nickname;
+    private String avatar;
+    private Integer role;//1 是 管理员; 2 是 普通用户
+    private Integer status; // 1 是 正常; 2是 封禁
 
     private LocalDateTime registrationDate; // 对应 Go 的 time.Time
+
 }

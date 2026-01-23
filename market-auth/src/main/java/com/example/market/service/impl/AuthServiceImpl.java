@@ -11,14 +11,19 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils; // Spring自带的字符串工具
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.time.LocalDateTime;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 @Service
 public class AuthServiceImpl implements AuthService {
 
     @Autowired
     private UserMapper userMapper;
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     // 使用 Spring Security 提供的加密工具
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
@@ -97,6 +102,10 @@ public class AuthServiceImpl implements AuthService {
         if (user == null) {
             throw new RuntimeException("用户名不存在");
         }
+        // 被封禁，禁止登录
+        if (user.getStatus() == 0) {
+            throw new RuntimeException("该账号已被封禁，请联系管理员");
+        }
 
         // 3. 校验密码
         // Go: bcrypt.CompareHashAndPassword(...)
@@ -109,8 +118,19 @@ public class AuthServiceImpl implements AuthService {
         if (!user.getRole().equals(request.getRole())) {
             throw new RuntimeException("角色不匹配");
         }
+        // 生成 Token
+        String token = UUID.randomUUID().toString().replace("-", "");
+        String userInfo = user.getUsername();
+        String key = "login:token:" + token;
+        redisTemplate.opsForValue().set(key, userInfo, 30, TimeUnit.MINUTES);
 
         // 5. 返回结果
-        return new LoginResponseDTO(user.getUserId(), user.getRole());
+        return new LoginResponseDTO(user.getUserId(), user.getRole(),token);
+    }
+
+    public void LogoutUser(String token) {
+        String key = "login:token:" + token;
+        // 直接删除，由于 Redis 是所有服务共享的，这个 Token 瞬间全网失效
+        redisTemplate.delete(key);
     }
 }
