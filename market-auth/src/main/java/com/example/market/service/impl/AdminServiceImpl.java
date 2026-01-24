@@ -46,7 +46,7 @@ public class AdminServiceImpl implements AdminService {
         saveLog(adminToken, action, "用户ID: " + input.getUserId());
     }
 
-    // === 核心：重置密码 ===
+    // === 重置密码 ===
     @Override
     public void resetPassword(String adminToken, AdminResetPwdDTO input) {
         checkAdminRole(adminToken);

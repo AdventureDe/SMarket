@@ -6,7 +6,7 @@ import java.math.BigDecimal;
 @Data
 public class ProductAddDTO {
     private Long userId;          // 对应 Go: UserID
-    private String category;      // 对应 Go: Category
+    private Long categoryId;
     private String productName;   // 对应 Go: Name
     private String productDescription; // 对应 Go: Description
     private String origin;        // 对应 Go: Origin

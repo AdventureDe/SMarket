@@ -1,5 +1,5 @@
 server:
-  port: 8081
+  port: 8084
 
 spring:
   application:
@@ -7,12 +7,7 @@ spring:
 
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/mydb
-      ?useUnicode=true
-      &characterEncoding=utf8
-      &connectionCollation=utf8mb4_unicode_ci
-      &useSSL=false
-      &serverTimezone=Asia/Shanghai
+    url: jdbc:mysql://localhost:3306/mydb?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
     username: lin
     password: 123456
 

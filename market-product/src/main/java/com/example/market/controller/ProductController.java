@@ -1,14 +1,16 @@
 package com.example.market.controller; // 修正了这里：去掉了 .product
 
 import com.example.market.common.Result;
-// 假设 DTO 和 Service 也同样调整到了 com.example.market 下
 import com.example.market.dto.ProductAddDTO;
+import com.example.market.dto.ProductListDTO;
 import com.example.market.dto.ProductRemoveDTO;
+import com.example.market.dto.ProductUpdateDTO;
 import com.example.market.entity.Product;
 import com.example.market.service.ProductService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import javax.servlet.http.HttpServletRequest;
 import java.util.List;
 
 @RestController
@@ -75,6 +77,19 @@ public class ProductController {
     }
 
     /**
+     * 更新商品信息接口
+     */
+    @PostMapping("/update")
+    public Result<String> updateProduct(@RequestBody ProductUpdateDTO input, HttpServletRequest request) {
+        // 建议增加一步：校验当前登录用户是否是该商品的发布者
+        // String token = request.getHeader("Authorization");
+        // ... 鉴权逻辑 ...
+
+        productService.updateProduct(input);
+        return Result.success("商品信息更新成功");
+    }
+
+    /**
      * 删除商品
      */
     @DeleteMapping("/removeProduct/{productId}")
@@ -84,6 +99,36 @@ public class ProductController {
         try {
             productService.removeProduct(productId, input.getUserId());
             return Result.success(null, "商品已删除");
+        } catch (Exception e) {
+            return Result.error(500, e.getMessage());
+        }
+    }
+
+    /**
+     * 上架商品
+     */
+    @PostMapping("/listProduct/{productId}")
+    public Result<String> listProduct(
+            @PathVariable("productId") Long productId,
+            @RequestBody ProductListDTO input) {
+        try {
+            productService.listProduct(productId, input.getUserId());
+            return Result.success(null, "商品已上架");
+        } catch (Exception e) {
+            return Result.error(500, e.getMessage());
+        }
+    }
+
+    /**
+     * 下架商品
+     */
+    @PostMapping("/delistProduct/{productId}")
+    public Result<String> delistProduct(
+            @PathVariable("productId") Long productId,
+            @RequestBody ProductListDTO input) {
+        try {
+            productService.delistProduct(productId, input.getUserId());
+            return Result.success(null, "商品已下架");
         } catch (Exception e) {
             return Result.error(500, e.getMessage());
         }
