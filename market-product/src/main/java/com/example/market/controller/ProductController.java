@@ -133,4 +133,10 @@ public class ProductController {
             return Result.error(500, e.getMessage());
         }
     }
+
+    @PostMapping("/products/batch")
+    public Result<List<Product>> getProductsByIds(@RequestBody List<Long> productIds) {
+        List<Product> products = productService.listByIds(productIds); // MyBatis-Plus 自带方法
+        return Result.success(products);
+    }
 }

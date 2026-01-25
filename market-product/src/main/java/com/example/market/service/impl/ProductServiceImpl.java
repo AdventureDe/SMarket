@@ -2,6 +2,7 @@ package com.example.market.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
+import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.example.market.dto.ProductAddDTO;
 import com.example.market.dto.ProductUpdateDTO;
 import com.example.market.entity.Category;
@@ -18,7 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Service
-public class ProductServiceImpl implements ProductService {
+public class ProductServiceImpl extends ServiceImpl<ProductMapper, Product> implements ProductService {
 
     @Autowired
     private ProductMapper productMapper;

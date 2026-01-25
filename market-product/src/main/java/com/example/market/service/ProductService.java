@@ -4,11 +4,12 @@ import com.example.market.dto.ProductAddDTO;
 import com.example.market.dto.ProductUpdateDTO;
 import com.example.market.entity.Product;
 import org.springframework.stereotype.Service;
+import com.baomidou.mybatisplus.extension.service.IService;
 
 import java.util.List;
 
 @Service
-public interface ProductService {
+public interface ProductService extends IService<Product> {
     // 获取首页商品
     List<Product> getActiveProducts();
     List<Product> getAdminProducts();
@@ -28,4 +29,6 @@ public interface ProductService {
     void listProduct(long productId, Long userId);
     void delistProduct(long productId, Long userId);
 
+//    //微服务
+//    List<Product> listByIds(List<Long> productIds);
 }

@@ -1,6 +1,8 @@
 package com.example.market.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.market.client.ProductClient;
+import com.example.market.common.Result;
 import com.example.market.dto.CartAddDTO;
 import com.example.market.dto.CartItemResponseDTO;
 import com.example.market.entity.CartItem;
@@ -11,13 +13,13 @@ import com.example.market.service.CartService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,54 +36,70 @@ public class CartServiceImpl implements CartService {
     private CartMapper cartMapper;
 
     @Autowired
-    private ProductMapper productMapper; // 需要这个Mapper来查商品详情
-
-    @Autowired
-    private StringRedisTemplate redisTemplate;
-
+    private ProductMapper productMapper;
     // 自注入用于调用 @Async 方法
     @Autowired
     @Lazy
     private CartServiceImpl self;
+
+    @Autowired
+    private ProductClient productClient;
+
+    @Autowired
+    private RedisTemplate<String, Object> redisTemplate;
 
     @Override
     public List<CartItemResponseDTO> getCartItems(Long userId) {
         String key = "cart:" + userId;
         long start = System.currentTimeMillis();
 
-        // 1. 尝试从 Redis 获取
-        // Go: HGetAll
+        // 1. 尝试从 Redis 获取 (逻辑不变)
         Map<Object, Object> cartMap = redisTemplate.opsForHash().entries(key);
-
         if (!cartMap.isEmpty()) {
-            log.info("Redis 响应时间: {}ms", System.currentTimeMillis() - start);
-            return buildCartFromRedis(cartMap);
+            log.info("Redis 命中，耗时: {}ms", System.currentTimeMillis() - start);
+            return buildCartFromRedis(cartMap); // 假设你这个方法已经写好了
         }
 
-        // 2. Redis 无数据时从 MySQL 加载
+        // 2. Redis 无数据，回源查询
         start = System.currentTimeMillis();
 
-        // MyBatis-Plus 没有直接的 JOIN，我们用逻辑拼装（或者在Mapper写XML）
-        // 这里模拟 Go 的 JOIN 逻辑：先查 CartItem，再查 Product
+        // 2.1 查自己的数据库，拿到只有 ID 的购物车数据
         List<CartItem> cartItems = cartMapper.selectList(new LambdaQueryWrapper<CartItem>()
                 .eq(CartItem::getUserId, userId));
 
         List<CartItemResponseDTO> results = new ArrayList<>();
+
         if (!cartItems.isEmpty()) {
-            // 提取商品ID列表
-            List<Long> productIds = cartItems.stream().map(CartItem::getProductId).collect(Collectors.toList());
-            // 批量查询商品
-            List<Product> products = productMapper.selectBatchIds(productIds);
-            // 转为 Map 方便匹配
+            // 2.2 提取商品ID列表
+            List<Long> productIds = cartItems.stream()
+                    .map(CartItem::getProductId)
+                    .collect(Collectors.toList());
+
+            // 2.3 远程调用商品服务
+            // 就像调用本地方法一样调用远程接口
+            Result<List<Product>> remoteResult = productClient.getProductsByIds(productIds);
+
+            // 2.4 安全检查：远程调用可能会失败，需要判空
+            List<Product> products = null;
+            if (remoteResult != null && remoteResult.getCode() == 200) {
+                products = remoteResult.getData();
+            } else {
+                // 如果商品服务挂了，这里可以选择抛异常，或者返回空列表，看业务容忍度
+                log.error("商品服务调用失败");
+                products = new ArrayList<>();
+            }
+
+            // 2.5 转 Map 方便匹配 (逻辑不变)
             Map<Long, Product> productMap = products.stream()
                     .collect(Collectors.toMap(Product::getProductId, p -> p));
 
-            // 组装结果
+            // 2.6 组装结果 (逻辑不变)
             for (CartItem item : cartItems) {
                 Product p = productMap.get(item.getProductId());
+                // 注意：如果商品被下架删除了，p 可能是 null，要处理
                 if (p != null) {
                     CartItemResponseDTO dto = new CartItemResponseDTO();
-                    dto.setCartId(item.getId());
+                    dto.setCartId(item.getCartId());
                     dto.setProductId(p.getProductId());
                     dto.setProductName(p.getProductName());
                     dto.setProductDescription(p.getProductDescription());
@@ -93,36 +111,38 @@ public class CartServiceImpl implements CartService {
             }
         }
 
-        log.info("MySQL 响应时间: {}ms", System.currentTimeMillis() - start);
+        log.info("回源查询耗时: {}ms", System.currentTimeMillis() - start);
 
-        // 3. 写入 Redis 缓存（异步）
-        // Go: go s.cacheCartItems(...)
-        self.cacheCartItems(userId, results);
+        // 3. 写入 Redis 缓存 (逻辑不变)
+        // 注意：这里要把 results 存进去，不仅减轻了 DB 压力，也减轻了 Feign 网络调用的压力
+        if (!results.isEmpty()) {
+            cacheCartItems(userId, results);
+        }
 
         return results;
     }
-
     /**
      * 异步方法：将DB结果缓存到Redis
      * Go: cacheCartItems
      */
     @Async
     public void cacheCartItems(Long userId, List<CartItemResponseDTO> items) {
-        if (items.isEmpty()) return;
+        if (items == null || items.isEmpty()) {
+            return;
+        }
 
         String key = "cart:" + userId;
-        // Go: Pipeline
-        // Spring RedisTemplate 默认支持 Pipeline，但简单的 putAll 也可以
-        // 为了精确模拟 Go 的 HSet 循环：
-        redisTemplate.executePipelined((org.springframework.data.redis.connection.RedisCallback<Object>) connection -> {
+
+        redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
+            byte[] keyBytes = key.getBytes();
+
             for (CartItemResponseDTO item : items) {
-                String field = String.valueOf(item.getProductId());
-                String value = String.valueOf(item.getQuantity());
-                // HSET key field value
-                connection.hSet(key.getBytes(), field.getBytes(), value.getBytes());
+                byte[] field = String.valueOf(item.getProductId()).getBytes();
+                byte[] value = String.valueOf(item.getQuantity()).getBytes();
+                connection.hSet(keyBytes, field, value);
             }
-            // Expire
-            connection.expire(key.getBytes(), 24 * 60 * 60); // 24 hours
+
+            connection.expire(keyBytes, 24 * 60 * 60);
             return null;
         });
     }

@@ -10,15 +10,13 @@ import java.time.LocalDateTime;
 @TableName("cart_items") // 假设数据库表名
 public class CartItem {
     @TableId(type = IdType.AUTO)
-    private Long id;
+    private Long cartId;
 
     private Long userId;      // 用户ID
     private Long productId;   // 商品ID
     private Integer quantity; // 数量
 
     // 如果需要展示商品详情，通常这里不存，而是查询时联表或远程调用
-    // 但为了简单，这里只映射数据库字段
-
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }
