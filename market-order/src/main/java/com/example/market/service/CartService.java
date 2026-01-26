@@ -10,4 +10,5 @@ public interface CartService {
     void addToCart(CartAddDTO input);
     void removeCartItem(Long userId, Long productId);
     void updateCartItemQuantity(Long userId, Long productId, Integer quantity);
+    void removeCartItemsBatch(Long userId, List<Long> productIds);
 }

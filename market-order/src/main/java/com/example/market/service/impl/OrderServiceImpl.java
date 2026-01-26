@@ -7,10 +7,13 @@ import com.example.market.dto.OrderResponseDTO;
 import com.example.market.entity.Address;
 import com.example.market.entity.Order;
 import com.example.market.entity.OrderProduct;
+import com.example.market.enums.OrderStatus; // 务必确保引入了枚举
 import com.example.market.mapper.AddressMapper;
 import com.example.market.mapper.OrderMapper;
 import com.example.market.mapper.OrderProductMapper;
+import com.example.market.service.CartService;
 import com.example.market.service.OrderService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+@Slf4j
 @Service
 public class OrderServiceImpl implements OrderService {
 
@@ -32,7 +36,8 @@ public class OrderServiceImpl implements OrderService {
     private OrderProductMapper orderProductMapper;
     @Autowired
     private AddressMapper addressMapper;
-
+    @Autowired
+    private CartService cartService;
     @Override
     @Transactional(rollbackFor = Exception.class)
     public OrderResponseDTO createOrder(OrderCreateDTO input) {
@@ -43,14 +48,12 @@ public class OrderServiceImpl implements OrderService {
         if (input.getTotalPrice() == null || input.getTotalPrice().compareTo(BigDecimal.ZERO) <= 0) {
             throw new RuntimeException("无效的订单总价");
         }
-
-        // 验证数组长度
         if (input.getProductIds() == null || input.getProductQuantities() == null ||
                 input.getProductIds().size() != input.getProductQuantities().size()) {
             throw new RuntimeException("商品ID与数量不匹配");
         }
 
-        // 2. 处理地址 (Go: 如果AddressID为0，则查找默认地址)
+        // 2. 处理地址
         Long finalAddressId = input.getAddressId();
         if (finalAddressId == null || finalAddressId == 0) {
             Address defaultAddr = addressMapper.selectOne(new LambdaQueryWrapper<Address>()
@@ -59,8 +62,7 @@ public class OrderServiceImpl implements OrderService {
             if (defaultAddr != null) {
                 finalAddressId = defaultAddr.getAddressId();
             } else {
-                // Go代码只打印了日志没报错，这里也可以选择报错，或者允许为空
-                System.out.println("没有找到默认地址");
+                throw new RuntimeException("请选择收货地址或设置默认地址");
             }
         }
 
@@ -68,7 +70,9 @@ public class OrderServiceImpl implements OrderService {
         Order newOrder = new Order();
         newOrder.setUserId(input.getUserId());
         newOrder.setTotalPrice(input.getTotalPrice());
-        newOrder.setStatus("待付款");
+
+        // 【修改】使用枚举设置初始状态
+        newOrder.setStatus(OrderStatus.PENDING_PAYMENT);
         newOrder.setPaymentStatus("未付款");
         newOrder.setAddressId(finalAddressId);
         newOrder.setCreatedAt(LocalDateTime.now());
@@ -76,29 +80,38 @@ public class OrderServiceImpl implements OrderService {
 
         orderMapper.insert(newOrder);
 
-        // 4. 插入 order_products 表
-        // Go: 循环插入
         List<OrderProductResponseDTO> productResponseList = new ArrayList<>();
 
         for (int i = 0; i < input.getProductIds().size(); i++) {
             Long pid = input.getProductIds().get(i);
             Integer num = input.getProductQuantities().get(i);
 
+            // 4.1 插入订单项
             OrderProduct op = new OrderProduct();
             op.setOrderId(newOrder.getOrderId());
             op.setProductId(pid);
             op.setNum(num);
             orderProductMapper.insert(op);
 
-            // 构建返回对象的一部分（虽然这里拿不到商品名和图片，Go代码里返回时也没去数据库查这些，
-            // 只是返回了空结构体或者前端不展示，这里为了简单先只填ID）
+            // 4.2 【核心新增】从购物车移除该商品
+            // 调用你 CartService 里写好的 removeCartItem 方法
+            // 这个方法不仅会删数据库，还会帮你删 Redis 缓存，保证一致性
+            try {
+                cartService.removeCartItem(input.getUserId(), pid);
+            } catch (Exception e) {
+                // 这里的异常处理策略取决于业务要求：
+                // 策略A (推荐)：记录日志但不回滚订单。毕竟订单生成了更重要，购物车没删干净也就是多显示一次。
+                System.err.println("移除购物车商品失败: " + pid + ", 原因: " + e.getMessage());
+
+                // 策略B (严格)：throw e; 让事务回滚，订单创建失败。
+            }
+
+            // 4.3 构建返回数据
             OrderProductResponseDTO pResp = new OrderProductResponseDTO();
             pResp.setProductId(pid);
             pResp.setQuantity(num);
             productResponseList.add(pResp);
         }
-
-        // Kafka 部分已删除 (Go: sendAsyncMessages)
 
         // 5. 构建响应
         OrderResponseDTO response = new OrderResponseDTO();
@@ -106,41 +119,95 @@ public class OrderServiceImpl implements OrderService {
         response.setCreateAt(newOrder.getCreatedAt());
         response.setTotalPrice(newOrder.getTotalPrice());
         response.setAddressId(newOrder.getAddressId());
-        response.setStatus(newOrder.getStatus());
+
+        // 返回状态的描述（如 "待支付"）或 code，视 DTO 定义而定
+        response.setStatus(newOrder.getStatus().getDesc());
         response.setProducts(productResponseList);
 
         return response;
     }
 
     @Override
-    public void cancelOrder(Long orderId) {
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelOrder(Long userId, Long orderId) {
         Order order = orderMapper.selectById(orderId);
-        if (order == null) {
-            throw new RuntimeException("订单不存在");
+        if (order == null) throw new RuntimeException("订单不存在");
+
+        if (!order.getUserId().equals(userId)) {
+            throw new RuntimeException("无权操作此订单");
         }
 
-        order.setStatus("已取消");
-        // Go: DB.Save(&order)
+        // 状态校验：只有待支付和已支付可以取消
+        if (order.getStatus() != OrderStatus.PENDING_PAYMENT &&
+                order.getStatus() != OrderStatus.PAID) {
+            throw new RuntimeException("当前状态不可取消");
+        }
+
+        order.setStatus(OrderStatus.CANCELLED);
+        orderMapper.updateById(order);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void paySuccess(Long orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) return;
+
+        if (order.getStatus() != OrderStatus.PENDING_PAYMENT) {
+            log.warn("订单[{}]非待支付状态，忽略支付回调", orderId);
+            return;
+        }
+
+        order.setStatus(OrderStatus.PAID);
+        order.setPayTime(LocalDateTime.now());
+        order.setPaymentStatus("已付款");
+        orderMapper.updateById(order);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void shipOrder(Long orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) throw new RuntimeException("订单不存在");
+
+        if (order.getStatus() != OrderStatus.PAID) {
+            throw new RuntimeException("只有已支付的订单才能发货");
+        }
+
+        order.setStatus(OrderStatus.SHIPPED);
+        orderMapper.updateById(order);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void completeOrder(Long userId, Long orderId) {
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) throw new RuntimeException("订单不存在");
+
+        if (!order.getUserId().equals(userId)) throw new RuntimeException("无权操作");
+
+        if (order.getStatus() != OrderStatus.SHIPPED) {
+            throw new RuntimeException("只有已发货的订单才能确认收货");
+        }
+
+        order.setStatus(OrderStatus.COMPLETED);
         orderMapper.updateById(order);
     }
 
     @Override
     public List<OrderResponseDTO> getOrders(Long userId) {
-        // 调用 Mapper 自定义的联表查询
-        // 结果是 List<Map<String, Object>>，每一行是一个 "订单+一个商品" 的扁平记录
         List<Map<String, Object>> rawRows = orderMapper.getOrdersWithProducts(userId);
-
-        // 使用 LinkedHashMap 保持订单插入顺序 (Go: created_at DESC)
         Map<Long, OrderResponseDTO> orderMap = new LinkedHashMap<>();
 
         for (Map<String, Object> row : rawRows) {
-            Long orderId = (Long) row.get("order_id");
+            // 【安全转换1】ID类
+            Long orderId = parseLong(row.get("order_id"));
 
-            // 如果 Map 中没有这个订单，就新建一个 DTO
             OrderResponseDTO dto = orderMap.computeIfAbsent(orderId, k -> {
                 OrderResponseDTO newDto = new OrderResponseDTO();
                 newDto.setOrderId(orderId);
-                // 处理时间类型转换 (MySQL驱动可能返回 Timestamp 或 LocalDateTime)
+
+                // 【安全转换2】时间类
                 Object createdAt = row.get("created_at");
                 if (createdAt instanceof Timestamp) {
                     newDto.setCreateAt(((Timestamp) createdAt).toLocalDateTime());
@@ -148,24 +215,53 @@ public class OrderServiceImpl implements OrderService {
                     newDto.setCreateAt((LocalDateTime) createdAt);
                 }
 
-                newDto.setStatus((String) row.get("status"));
-                newDto.setTotalPrice((BigDecimal) row.get("total_price"));
-                newDto.setAddressId((Long) row.get("address_id"));
+                // 【安全转换3】状态类
+                // 数据库返回的是 int (0, 1, 2...)，需要转回 Enum 再获取描述
+                Integer statusCode = parseInteger(row.get("status"));
+                // 简单的遍历查找，也可以在 Enum 里写个 getByCode 方法
+                String statusDesc = "未知状态";
+                for (OrderStatus os : OrderStatus.values()) {
+                    if (os.getCode().equals(statusCode)) {
+                        statusDesc = os.getDesc();
+                        break;
+                    }
+                }
+                newDto.setStatus(statusDesc);
+
+                // 【安全转换4】金额类
+                newDto.setTotalPrice(parseBigDecimal(row.get("total_price")));
+                newDto.setAddressId(parseLong(row.get("address_id")));
                 newDto.setProducts(new ArrayList<>());
                 return newDto;
             });
 
-            // 添加商品信息
             OrderProductResponseDTO productDTO = new OrderProductResponseDTO();
-            productDTO.setProductId((Long) row.get("product_id"));
-            productDTO.setQuantity((Integer) row.get("quantity"));
+            productDTO.setProductId(parseLong(row.get("product_id")));
+            productDTO.setQuantity(parseInteger(row.get("quantity")));
             productDTO.setProductName((String) row.get("product_name"));
             productDTO.setImageUrl((String) row.get("image_url"));
-            productDTO.setPrice((BigDecimal) row.get("price"));
+            productDTO.setPrice(parseBigDecimal(row.get("price")));
 
             dto.getProducts().add(productDTO);
         }
 
         return new ArrayList<>(orderMap.values());
+    }
+
+    // --- 辅助转换方法 ---
+
+    private Long parseLong(Object obj) {
+        if (obj == null) return null;
+        return Long.valueOf(obj.toString());
+    }
+
+    private Integer parseInteger(Object obj) {
+        if (obj == null) return null;
+        return Integer.valueOf(obj.toString()); // 更加宽容，可以处理 Long 转 Integer
+    }
+
+    private BigDecimal parseBigDecimal(Object obj) {
+        if (obj == null) return BigDecimal.ZERO;
+        return new BigDecimal(obj.toString());
     }
 }

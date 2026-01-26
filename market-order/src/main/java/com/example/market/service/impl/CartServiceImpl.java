@@ -10,18 +10,21 @@ import com.example.market.entity.Product;
 import com.example.market.mapper.CartMapper;
 import com.example.market.mapper.ProductMapper;
 import com.example.market.service.CartService;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
-import org.springframework.data.redis.core.RedisCallback;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.EnableAsync;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -29,7 +32,7 @@ import java.util.stream.Collectors;
 
 @Slf4j
 @Service
-@EnableAsync // 开启异步支持
+@EnableAsync
 public class CartServiceImpl implements CartService {
 
     @Autowired
@@ -37,66 +40,68 @@ public class CartServiceImpl implements CartService {
 
     @Autowired
     private ProductMapper productMapper;
-    // 自注入用于调用 @Async 方法
-    @Autowired
-    @Lazy
-    private CartServiceImpl self;
 
     @Autowired
     private ProductClient productClient;
 
+    // 1. 统一使用 StringRedisTemplate，避免序列化问题
     @Autowired
-    private RedisTemplate<String, Object> redisTemplate;
+    private StringRedisTemplate stringRedisTemplate;
+
+    // 2. 自注入，用于在类内部调用 @Async 方法使其生效
+    @Autowired
+    @Lazy
+    private CartServiceImpl self;
 
     @Override
     public List<CartItemResponseDTO> getCartItems(Long userId) {
         String key = "cart:" + userId;
         long start = System.currentTimeMillis();
 
-        // 1. 尝试从 Redis 获取 (逻辑不变)
-        Map<Object, Object> cartMap = redisTemplate.opsForHash().entries(key);
-        if (!cartMap.isEmpty()) {
-            log.info("Redis 命中，耗时: {}ms", System.currentTimeMillis() - start);
-            return buildCartFromRedis(cartMap); // 假设你这个方法已经写好了
+        // 3. 尝试从 Redis 获取
+        Map<Object, Object> rawMap = stringRedisTemplate.opsForHash().entries(key);
+
+        // 【关键】只有 Redis 有数据时才返回
+        // 因为我们在写入时采用了“全量删除”策略，所以只要 Key 存在，数据一定是完整的
+        if (!rawMap.isEmpty()) {
+            log.info("Redis 命中");
+            return buildCartFromRedis(rawMap);
         }
 
-        // 2. Redis 无数据，回源查询
+        // 4. Redis 无数据，回源查询
         start = System.currentTimeMillis();
 
-        // 2.1 查自己的数据库，拿到只有 ID 的购物车数据
+        // 4.1 查数据库
         List<CartItem> cartItems = cartMapper.selectList(new LambdaQueryWrapper<CartItem>()
                 .eq(CartItem::getUserId, userId));
 
         List<CartItemResponseDTO> results = new ArrayList<>();
 
         if (!cartItems.isEmpty()) {
-            // 2.2 提取商品ID列表
+            // 4.2 提取商品ID列表
             List<Long> productIds = cartItems.stream()
                     .map(CartItem::getProductId)
                     .collect(Collectors.toList());
 
-            // 2.3 远程调用商品服务
-            // 就像调用本地方法一样调用远程接口
+            // 4.3 远程调用商品服务
             Result<List<Product>> remoteResult = productClient.getProductsByIds(productIds);
 
-            // 2.4 安全检查：远程调用可能会失败，需要判空
+            // 4.4 安全检查
             List<Product> products = null;
             if (remoteResult != null && remoteResult.getCode() == 200) {
                 products = remoteResult.getData();
             } else {
-                // 如果商品服务挂了，这里可以选择抛异常，或者返回空列表，看业务容忍度
                 log.error("商品服务调用失败");
                 products = new ArrayList<>();
             }
 
-            // 2.5 转 Map 方便匹配 (逻辑不变)
+            // 4.5 转 Map
             Map<Long, Product> productMap = products.stream()
                     .collect(Collectors.toMap(Product::getProductId, p -> p));
 
-            // 2.6 组装结果 (逻辑不变)
+            // 4.6 组装结果
             for (CartItem item : cartItems) {
                 Product p = productMap.get(item.getProductId());
-                // 注意：如果商品被下架删除了，p 可能是 null，要处理
                 if (p != null) {
                     CartItemResponseDTO dto = new CartItemResponseDTO();
                     dto.setCartId(item.getCartId());
@@ -113,71 +118,62 @@ public class CartServiceImpl implements CartService {
 
         log.info("回源查询耗时: {}ms", System.currentTimeMillis() - start);
 
-        // 3. 写入 Redis 缓存 (逻辑不变)
-        // 注意：这里要把 results 存进去，不仅减轻了 DB 压力，也减轻了 Feign 网络调用的压力
+        // 5. 写入 Redis 缓存 (异步)
         if (!results.isEmpty()) {
-            cacheCartItems(userId, results);
+            self.cacheCartItems(userId, results);
         }
 
         return results;
     }
+
     /**
      * 异步方法：将DB结果缓存到Redis
-     * Go: cacheCartItems
      */
     @Async
     public void cacheCartItems(Long userId, List<CartItemResponseDTO> items) {
-        if (items == null || items.isEmpty()) {
-            return;
-        }
-
+        if (items == null || items.isEmpty()) return;
         String key = "cart:" + userId;
 
-        redisTemplate.executePipelined((RedisCallback<Object>) connection -> {
-            byte[] keyBytes = key.getBytes();
+        ObjectMapper mapper = new ObjectMapper();
+        Map<String, String> dataToCache = new HashMap<>();
 
-            for (CartItemResponseDTO item : items) {
-                byte[] field = String.valueOf(item.getProductId()).getBytes();
-                byte[] value = String.valueOf(item.getQuantity()).getBytes();
-                connection.hSet(keyBytes, field, value);
+        for (CartItemResponseDTO item : items) {
+            try {
+                String field = String.valueOf(item.getProductId());
+                // 将对象转为 JSON 字符串存储
+                String value = mapper.writeValueAsString(item);
+                dataToCache.put(field, value);
+            } catch (JsonProcessingException e) {
+                log.error("序列化失败", e);
             }
+        }
 
-            connection.expire(keyBytes, 24 * 60 * 60);
-            return null;
-        });
+        if (!dataToCache.isEmpty()) {
+            stringRedisTemplate.opsForHash().putAll(key, dataToCache);
+            stringRedisTemplate.expire(key, 24, TimeUnit.HOURS);
+        }
     }
 
-    /**
-     * 从 Redis 数据构建响应
-     * Go: buildCartFromRedis
-     */
     private List<CartItemResponseDTO> buildCartFromRedis(Map<Object, Object> cartMap) {
-        List<Long> productIds = new ArrayList<>();
-        for (Object k : cartMap.keySet()) {
-            productIds.add(Long.valueOf(k.toString()));
+        List<CartItemResponseDTO> list = new ArrayList<>();
+        ObjectMapper mapper = new ObjectMapper();
+
+        for (Map.Entry<Object, Object> entry : cartMap.entrySet()) {
+            String jsonStr = (String) entry.getValue();
+
+            // 简单校验是否为 JSON 格式
+            if (!StringUtils.hasText(jsonStr) || !jsonStr.trim().startsWith("{")) {
+                continue;
+            }
+
+            try {
+                CartItemResponseDTO dto = mapper.readValue(jsonStr, CartItemResponseDTO.class);
+                list.add(dto);
+            } catch (Exception e) {
+                log.error("JSON转对象失败: {}", jsonStr, e);
+            }
         }
-
-        if (productIds.isEmpty()) return new ArrayList<>();
-
-        // 从数据库获取商品详情
-        List<Product> products = productMapper.selectBatchIds(productIds);
-
-        List<CartItemResponseDTO> results = new ArrayList<>();
-        for (Product p : products) {
-            String qtyStr = (String) cartMap.get(String.valueOf(p.getProductId()));
-            Integer qty = qtyStr != null ? Integer.valueOf(qtyStr) : 0;
-
-            CartItemResponseDTO dto = new CartItemResponseDTO();
-            dto.setProductId(p.getProductId());
-            dto.setProductName(p.getProductName());
-            dto.setProductDescription(p.getProductDescription());
-            dto.setPrice(p.getPrice());
-            dto.setImageUrl(p.getImageUrl());
-            dto.setQuantity(qty);
-            // 注意：Redis缓存模式下，cart_id 可能拿不到，除非存在 Redis value 里，这里暂空
-            results.add(dto);
-        }
-        return results;
+        return list;
     }
 
     @Override
@@ -195,8 +191,7 @@ public class CartServiceImpl implements CartService {
             throw new RuntimeException("product not exist");
         }
 
-        // 3. 更新数据库 (模拟 Go 的 ON DUPLICATE KEY UPDATE)
-        // Java JPA/MyBatis 通常做法是先查后改
+        // 3. 更新数据库
         CartItem existingItem = cartMapper.selectOne(new LambdaQueryWrapper<CartItem>()
                 .eq(CartItem::getUserId, input.getUserId())
                 .eq(CartItem::getProductId, input.getProductId()));
@@ -217,12 +212,11 @@ public class CartServiceImpl implements CartService {
             cartMapper.insert(newItem);
         }
 
-        // 4. 更新 Redis (原子操作 HIncrBy)
+        // 4. 【核心修复】Redis 缓存失效策略
+        // 直接删除该用户的整个购物车 Key，强制下次读取时从 DB 加载最新全量数据
+        // 解决了 "添加新商品后，Redis 只有旧数据，导致显示不全" 的问题
         String key = "cart:" + input.getUserId();
-        redisTemplate.opsForHash().increment(key, String.valueOf(input.getProductId()), quantity);
-
-        // 5. 设置过期时间
-        redisTemplate.expire(key, 7, TimeUnit.DAYS);
+        stringRedisTemplate.delete(key);
     }
 
     @Override
@@ -230,14 +224,14 @@ public class CartServiceImpl implements CartService {
     public void removeCartItem(Long userId, Long productId) {
         if (userId == null || productId == null) return;
 
-        // 先操作数据库
+        // 1. 操作数据库
         cartMapper.delete(new LambdaQueryWrapper<CartItem>()
                 .eq(CartItem::getUserId, userId)
                 .eq(CartItem::getProductId, productId));
 
-        // 再操作 Redis
+        // 2. 操作 Redis：直接删除 Key
         String key = "cart:" + userId;
-        redisTemplate.opsForHash().delete(key, String.valueOf(productId));
+        stringRedisTemplate.delete(key);
     }
 
     @Override
@@ -245,7 +239,7 @@ public class CartServiceImpl implements CartService {
     public void updateCartItemQuantity(Long userId, Long productId, Integer quantity) {
         if (quantity <= 0) throw new RuntimeException("数量必须大于0");
 
-        // 先更新数据库
+        // 1. 更新数据库
         CartItem item = cartMapper.selectOne(new LambdaQueryWrapper<CartItem>()
                 .eq(CartItem::getUserId, userId)
                 .eq(CartItem::getProductId, productId));
@@ -258,8 +252,22 @@ public class CartServiceImpl implements CartService {
         item.setUpdateTime(LocalDateTime.now());
         cartMapper.updateById(item);
 
-        // 再更新 Redis (HSet)
+        // 2. 更新 Redis：直接删除 Key
         String key = "cart:" + userId;
-        redisTemplate.opsForHash().put(key, String.valueOf(productId), String.valueOf(quantity));
+        stringRedisTemplate.delete(key);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void removeCartItemsBatch(Long userId, List<Long> productIds) {
+        if (productIds == null || productIds.isEmpty()) return;
+
+        // 1. 批量删 DB
+        cartMapper.delete(new LambdaQueryWrapper<CartItem>()
+                .eq(CartItem::getUserId, userId)
+                .in(CartItem::getProductId, productIds)); // 使用 IN 查询
+
+        // 2. 删 Redis Key (直接删整个购物车 Key 最省事)
+        stringRedisTemplate.delete("cart:" + userId);
     }
 }

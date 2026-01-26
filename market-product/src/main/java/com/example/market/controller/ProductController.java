@@ -134,7 +134,7 @@ public class ProductController {
         }
     }
 
-    @PostMapping("/products/batch")
+    @PostMapping("/product/batch")
     public Result<List<Product>> getProductsByIds(@RequestBody List<Long> productIds) {
         List<Product> products = productService.listByIds(productIds); // MyBatis-Plus 自带方法
         return Result.success(products);
