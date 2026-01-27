@@ -2,6 +2,7 @@ package com.example.market.controller;
 
 import com.example.market.common.Result;
 import com.example.market.dto.OrderCreateDTO;
+import com.example.market.dto.OrderDetailResponseDTO;
 import com.example.market.dto.OrderResponseDTO;
 import com.example.market.service.OrderService;
 import lombok.RequiredArgsConstructor;
@@ -78,5 +79,16 @@ public class OrderController {
     public Result<String> testShip(@PathVariable Long orderId) {
         orderService.shipOrder(orderId);
         return Result.success("发货成功");
+    }
+
+    /**
+     * 获取订单详情
+     * GET /order/detail/{orderId}
+     */
+    @GetMapping("/detail/{orderId}")
+    public Result<OrderDetailResponseDTO> getOrderDetail(@RequestHeader("user_id") Long userId,
+                                                         @PathVariable Long orderId) {
+        OrderDetailResponseDTO detail = orderService.getOrderDetail(userId, orderId);
+        return Result.success(detail);
     }
 }

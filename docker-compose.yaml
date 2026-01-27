@@ -32,3 +32,4 @@ services:
     volumes:
       - ./data/nacos/logs:/home/nacos/logs
       - ./data/nacos/data:/home/nacos/data
+    stop_grace_period: 1m

@@ -2,6 +2,7 @@ package com.example.market.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.market.dto.OrderCreateDTO;
+import com.example.market.dto.OrderDetailResponseDTO;
 import com.example.market.dto.OrderProductResponseDTO;
 import com.example.market.dto.OrderResponseDTO;
 import com.example.market.entity.Address;
@@ -263,5 +264,63 @@ public class OrderServiceImpl implements OrderService {
     private BigDecimal parseBigDecimal(Object obj) {
         if (obj == null) return BigDecimal.ZERO;
         return new BigDecimal(obj.toString());
+    }
+
+    @Override
+    public OrderDetailResponseDTO getOrderDetail(Long userId, Long orderId) {
+        // 1. 查询订单主表
+        Order order = orderMapper.selectById(orderId);
+        if (order == null) {
+            throw new RuntimeException("订单不存在");
+        }
+
+        // 2. 权限校验 (防止用户通过改 URL ID 查看别人的订单)
+        if (!order.getUserId().equals(userId)) {
+            throw new RuntimeException("无权查看此订单");
+        }
+
+        // 3. 查询关联的商品信息 (使用之前的 Join 查询逻辑或者再次查表)
+        // 这里为了简单，我们重用之前的 Mapper 逻辑或者直接查 OrderProduct 表
+        // 假设我们复用 getOrdersWithProducts 的逻辑，但加上 orderId 过滤
+        List<Map<String, Object>> productRows = orderMapper.getOrderDetails(orderId);
+        // *注：需要在 Mapper XML 中写这个 SQL，下文会给
+
+        // 4. 查询收货地址信息
+        Address address = addressMapper.selectById(order.getAddressId());
+
+        // 5. 组装 DTO
+        OrderDetailResponseDTO dto = new OrderDetailResponseDTO();
+        dto.setOrderId(order.getOrderId());
+        dto.setStatus(order.getStatus().getDesc());
+        dto.setStatusCode(order.getStatus().getCode());
+        dto.setTotalPrice(order.getTotalPrice());
+        dto.setCreateAt(order.getCreatedAt());
+        dto.setPayTime(order.getPayTime());
+
+        // 组装地址 (如果地址被物理删除了，address 可能是 null)
+        if (address != null) {
+            dto.setRecipient(address.getRecipient());
+            dto.setPhone(address.getPhone());
+            dto.setFullAddress(String.format("%s %s %s %s %s",
+                    address.getCountry(), address.getProvince(), address.getCity(),
+                    address.getDistrict(), address.getStreet()));
+        } else {
+            dto.setFullAddress("该地址已失效");
+        }
+
+        // 组装商品列表
+        List<OrderProductResponseDTO> productList = new ArrayList<>();
+        for (Map<String, Object> row : productRows) {
+            OrderProductResponseDTO p = new OrderProductResponseDTO();
+            p.setProductId(parseLong(row.get("product_id")));
+            p.setProductName((String) row.get("product_name"));
+            p.setImageUrl((String) row.get("image_url"));
+            p.setPrice(parseBigDecimal(row.get("price")));
+            p.setQuantity(parseInteger(row.get("quantity")));
+            productList.add(p);
+        }
+        dto.setProducts(productList);
+
+        return dto;
     }
 }

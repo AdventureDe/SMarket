@@ -1,6 +1,7 @@
 package com.example.market.service;
 
 import com.example.market.dto.OrderCreateDTO;
+import com.example.market.dto.OrderDetailResponseDTO;
 import com.example.market.dto.OrderResponseDTO;
 import java.util.List;
 
@@ -18,4 +19,6 @@ public interface OrderService {
 
     // 取消订单 (待支付/已支付 -> 已取消)
     void cancelOrder(Long userId, Long orderId); // 加上 userId 防止越权
+
+    OrderDetailResponseDTO getOrderDetail(Long userId, Long orderId);
 }
