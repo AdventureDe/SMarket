@@ -5,11 +5,21 @@ spring:
   application:
     name: market-comment
 
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 127.0.0.1:8848
+
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/mydb?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai
-    username: lin
-    password: 123456
+    url: jdbc:mysql://localhost:3306/smarket
+      ?useUnicode=true
+      &characterEncoding=utf8
+      &connectionCollation=utf8mb4_unicode_ci
+      &useSSL=false
+      &serverTimezone=Asia/Shanghai
+    username: root
+    password: root123
 
   redis:
     host: localhost
